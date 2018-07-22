@@ -347,7 +347,7 @@ func (l *LoadDataInfo) InsertData(prevData, curData []byte, rows *[][]string, tb
 			if inserts, err := l.MakeInsert(*rows, tb, fields); err != nil {
 				return nil, false, err
 			} else {
-				*rows = make([][]string, 0)
+				*rows = make([][]string, 0,*loadMaxRowsInBatch)
 				if err := callback(inserts); err != nil {
 					return nil, false, err
 				}
@@ -358,7 +358,7 @@ func (l *LoadDataInfo) InsertData(prevData, curData []byte, rows *[][]string, tb
 	return curData, reachLimit, nil
 }
 
-func (l *LoadDataInfo) insertDataWithCommit(prevData, curData []byte,  rows *[][]string, tb *vindexes.Table, fields []*querypb.Field, callback InsertFunc) ([]byte, error) {
+func (l *LoadDataInfo) insertDataWithBatch(prevData, curData []byte,  rows *[][]string, tb *vindexes.Table, fields []*querypb.Field, callback InsertFunc) ([]byte, error) {
 	var err error
 	var reachLimit bool
 	for {
@@ -375,81 +375,6 @@ func (l *LoadDataInfo) insertDataWithCommit(prevData, curData []byte,  rows *[][
 	return prevData, nil
 }
 
-// LoadDataInfileDataStream load the cvs content
-//func (l *LoadDataInfo) LoadDataInfileDataStream( /*data []byte,*/ctx context.Context, c *mysqlconn.Conn, bindVariables map[string]interface{}, session *vtgate.Session, tabletType topodata.TabletType) (*sqltypes.Result, error) {
-//	loadRes := &sqltypes.Result{}
-//	// Add some kind of timeout too.
-//	var shouldBreak bool
-//	var prevData, curData []byte
-//	tableName := l.Table.Name.String()
-//	tb, err := vh.vtg.router.planner.vschema.Find(c.SchemaName, tableName)
-//	if err != nil {
-//		return nil, fmt.Errorf("table %s not found", tableName)
-//	}
-//	var fields []*querypb.Field
-//	if tb.Keyspace.Sharded && !tb.SingleShard {
-//		qr, err := vh.vtg.router.GetFields(ctx, fmt.Sprintf("SELECT * FROM %s", tableName),
-//			bindVariables, c.SchemaName, tabletType, session, true, &querypb.ExecuteOptions{IncludedFields: querypb.ExecuteOptions_ALL})
-//		if err != nil {
-//			return nil, err
-//		}
-//		fields = qr.Fields
-//	}
-//	var rows = make([][]string, 0)
-//	for {
-//		curData, err = c.ReadPacket()
-//		if err != nil {
-//			if err == io.EOF {
-//				log.Error(err)
-//				c.LoadDataDone = true
-//				break
-//			}
-//		}
-//
-//		if len(curData) == 0 {
-//			shouldBreak = true
-//			if len(prevData) == 0 {
-//				c.LoadDataDone = true
-//				break
-//			}
-//		}
-//		if prevData, err = l.insertDataWithCommit(prevData, curData, &rows, tb, fields, func(insert string) error {
-//			// load data retry ExecuteMerge
-//			var result *sqltypes.Result
-//			if insert == "" {
-//				return nil
-//			}
-//			result, err = vh.LoadDataRetry(ctx, c, insert, bindVariables, tabletType, session)
-//			if err != nil {
-//				return err
-//			}
-//			loadRes.InsertID = result.InsertID
-//			loadRes.RowsAffected += result.RowsAffected
-//			loadRes.Fields = result.Fields
-//			return nil
-//		}); err != nil {
-//			return nil, err
-//		}
-//		if shouldBreak {
-//			c.LoadDataDone = true
-//			break
-//		}
-//	}
-//	if len(rows) > 0 {
-//		if inserts, err := l.MakeInsert(rows, tb, fields); err != nil {
-//			return nil, err
-//		} else {
-//			result, err := vh.LoadDataRetry(ctx, c, inserts, bindVariables, tabletType, session)
-//			if err != nil {
-//				return nil, err
-//			}
-//			loadRes.InsertID = result.InsertID
-//			loadRes.RowsAffected += result.RowsAffected
-//			loadRes.Fields = result.Fields
-//		}
-//	}
-//	return loadRes, nil
-//}
 
 func escapeCols(strs [][]byte) []string {
 	ret := make([]string, len(strs))

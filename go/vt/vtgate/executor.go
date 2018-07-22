@@ -210,9 +210,6 @@ func (e *Executor) execute(ctx context.Context, safeSession *SafeSession, sql st
 
 		// In legacy mode, we ignore autocommit settings.
 		if e.legacyAutocommit {
-
-			//e.LoadDataStart(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
-
 			return e.LoadDataStart(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
 		}
 
@@ -238,7 +235,6 @@ func (e *Executor) execute(ctx context.Context, safeSession *SafeSession, sql st
 		safeSession.SetAutocommitable(mustCommit)
 
 		qr, err :=e.LoadDataStart(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
-		//qr, err := e.handleExec(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
 		if err != nil {
 			return nil, err
 		}
@@ -1470,11 +1466,11 @@ func (e *Executor) LoadDataInfileDataStream( ld *LoadData, ctx context.Context, 
 	var fields []*querypb.Field
 	var err error
 	var shouldBreak bool
-
-	var rows = make([][]string, 0)
+	var rows = make([][]string, 0,*loadMaxRowsInBatch)
 	for {
 		curData, err = c.ReadPacket()
 		if err != nil {
+			c.LoadDataDone = true
 			if err == io.EOF {
 				log.Error(err)
 				c.LoadDataDone = true
@@ -1494,7 +1490,7 @@ func (e *Executor) LoadDataInfileDataStream( ld *LoadData, ctx context.Context, 
 			return nil,err
 		}
 		fields=re.Fields
-		if prevData, err = ld.LoadDataInfo.insertDataWithCommit(prevData, curData,  &rows, tb, fields, func(insert string) error {
+		if prevData,err = ld.LoadDataInfo.insertDataWithBatch(prevData, curData,  &rows, tb, fields, func(insert string) error {
 			// load data retry ExecuteMerge
 			if insert == "" {
 				return nil
@@ -1530,25 +1526,6 @@ func (e *Executor) LoadDataInfileDataStream( ld *LoadData, ctx context.Context, 
 	}
 	return loadRes, nil
 }
-
-
-func (e *Executor) insertDataWithCommit(prevData, curData []byte, ld *LoadData, rows *[][]string, tb *vindexes.Table, fields []*querypb.Field, callback InsertFunc) ([]byte, error) {
-	var err error
-	var reachLimit bool
-	for {
-		prevData, reachLimit, err = ld.LoadDataInfo.InsertData(prevData, curData, rows, tb, fields, callback)
-		if err != nil {
-			return nil, err
-		}
-		if !reachLimit {
-			break
-		}
-		curData = prevData
-		prevData = nil
-	}
-	return prevData, nil
-}
-
 
 // LoadDataRetry Try again twice when an error occurs
 func (e *Executor) LoadDataRetry(ctx context.Context, result *sqltypes.Result, safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable, destKeyspace string, destTabletType topodatapb.TabletType, dest key.Destination, logStats *LogStats) (*sqltypes.Result, error) {
