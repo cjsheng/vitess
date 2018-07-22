@@ -237,6 +237,7 @@ func (*Union) iStatement()      {}
 func (*Select) iStatement()     {}
 func (*Stream) iStatement()     {}
 func (*Insert) iStatement()     {}
+func (*LoadDataStmt) iStatement() {}
 func (*Update) iStatement()     {}
 func (*Delete) iStatement()     {}
 func (*Set) iStatement()        {}
@@ -535,6 +536,74 @@ type InsertRows interface {
 	iInsertRows()
 	SQLNode
 }
+
+
+// LoadDataStmt represents an INSERT statement.
+type LoadDataStmt struct {
+	Action     string
+	IsLocal    bool
+	Path       string
+	Table      TableName
+	Columns    Columns
+	FieldsInfo *FieldsClause
+	LinesInfo  *LinesClause
+}
+
+// Format formats the node.
+func (node *LoadDataStmt) Format(buf *TrackedBuffer) {
+	//var localOpt string
+	//if node.IsLocal {
+	//	localOpt = "local"
+	//}
+	//buf.Myprintf("%s data %s  infile %s into table %v %v %v%v",
+	//	node.Action, localOpt, node.Path, node.Table, node.Columns, node.FieldsInfo, node.LinesInfo)
+}
+
+// walkSubtree walks the nodes of the subtree.
+func (node *LoadDataStmt) walkSubtree(visit Visit) error {
+	return nil
+}
+
+// FieldsClause represents fields references clause in load data statement.
+type FieldsClause struct {
+	Terminated string
+	Enclosed   byte
+	Escaped    byte
+	Expr       Expr
+	Direction  string
+}
+
+// Format formats the node.
+func (node *FieldsClause) Format(buf *TrackedBuffer) {
+	//prefix := "FIELDS TERMINATED BY "
+	//buf.Myprintf("%s%s enclosed by %s ESCAPED BY %s ",  prefix, node.Terminated, node.Enclosed, node.Escaped)
+}
+
+// walkSubtree walks the nodes of the subtree.
+func (node *FieldsClause) walkSubtree(visit Visit) error {
+	return nil
+}
+
+// LinesClause represents lines references clause in load data statement.
+type LinesClause struct {
+	Starting   string
+	Terminated string
+	Expr       Expr
+	Direction  string
+}
+
+// Format formats the node.
+func (node *LinesClause) Format(buf *TrackedBuffer) {
+	//prefix := "LINES STARTING BY  "
+	//buf.Myprintf("%s STARTING BY TERMINATED BY %s ", prefix, node.Starting, node.Terminated)
+}
+
+// walkSubtree walks the nodes of the subtree.
+func (node *LinesClause) walkSubtree(visit Visit) error {
+	return nil
+}
+
+
 
 func (*Select) iInsertRows()      {}
 func (*Union) iInsertRows()       {}

@@ -184,6 +184,9 @@ type Conn struct {
 	currentEphemeralPolicy int
 	currentEphemeralPacket []byte
 	currentEphemeralBuffer *[]byte
+
+	//LoadDtaDone used for load data, set true if load data fnished(error or success)
+	LoadDataDone bool
 }
 
 // bufPool is used to allocate and free buffers in an efficient way.
