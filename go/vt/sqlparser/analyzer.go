@@ -158,6 +158,15 @@ func IsDML(sql string) bool {
 	return false
 }
 
+// IsLoadData returns true if the query is an StmtLoadData statement.
+func IsLoadData(sql string) bool {
+	switch Preview(sql) {
+	case StmtLoadData:
+		return true
+	}
+	return false
+}
+
 // GetTableName returns the table name from the SimpleTableExpr
 // only if it's a simple expression. Otherwise, it returns "".
 func GetTableName(node SimpleTableExpr) TableIdent {

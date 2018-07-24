@@ -185,7 +185,7 @@ type Conn struct {
 	currentEphemeralPacket []byte
 	currentEphemeralBuffer *[]byte
 
-	//LoadDtaDone used for load data, set true if load data fnished(error or success)
+	//LoadDtaDone used for load data, set true if load data done(error or success)
 	LoadDataDone bool
 }
 

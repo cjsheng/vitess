@@ -6,10 +6,10 @@ import (
 	"strings"
 
 	querypb "vitess.io/vitess/go/vt/proto/query"
-	"vitess.io/vitess/go/vt/sqlparser"
 	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
-	"vitess.io/vitess/go/vt/vtgate/vindexes"
+	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/vterrors"
+	"vitess.io/vitess/go/vt/vtgate/vindexes"
 )
 
 // InsertFunc insert callback
@@ -129,7 +129,6 @@ func (l *LoadDataInfo) getLine(prevData, curData []byte) ([]byte, []byte, bool) 
 		if len(prevData) == 0 {
 			return nil, curData, true
 		}
-
 		// terminated symbol in the middle of prevData and curData
 		curData = append(prevData, curData...)
 		endIdx = strings.Index(string(curData[startingLen:]), l.LinesInfo.Terminated)
@@ -140,13 +139,11 @@ func (l *LoadDataInfo) getLine(prevData, curData []byte) ([]byte, []byte, bool) 
 		// no terminated symbol
 		return nil, curData, true
 	}
-
 	// terminated symbol in the curData
 	nextDataIdx := curStartIdx + endIdx + terminatedLen
 	if len(prevData) == 0 {
 		return curData[curStartIdx : curStartIdx+endIdx], curData[nextDataIdx:], true
 	}
-
 	// terminated symbol in the curData
 	prevData = append(prevData, curData[:nextDataIdx]...)
 	endIdx = strings.Index(string(prevData[startingLen:]), l.LinesInfo.Terminated)
@@ -208,6 +205,7 @@ func (l *LoadDataInfo) MysqlEscap(source string) (string, error) {
 	return string(desc[0:j]), nil
 }
 
+// MakeInsert  batch "insert ignore into" implents load data
 func (l *LoadDataInfo) MakeInsert(rows [][]string, tb *vindexes.Table, fields []*querypb.Field) (string, error) {
 	if len(rows) == 0 {
 		return "", nil
@@ -215,26 +213,19 @@ func (l *LoadDataInfo) MakeInsert(rows [][]string, tb *vindexes.Table, fields []
 	var insertVasSQLBuf bytes.Buffer
 	insertVasSQLBuf.WriteString("INSERT  IGNORE  INTO ")
 	insertVasSQLBuf.WriteString(l.Table.Name.String())
-	var needResolveVindexType = false
-	if tb.Keyspace.Sharded  {
-		needResolveVindexType = true
-	}
 
 	//get fields type and make the  insert ignore into values(...)
-	var vindexIdx = -1
-	var vindexFiledType querypb.Type
 	columns := l.Columns
 	columnsSize := len(columns)
+	var specificFields = make([]*querypb.Field, 0, len(columns))
+	insertVasSQLBuf.WriteString("(")
+
+	// identify columns is not necessary
 	if columns != nil && columnsSize > 0 {
-		insertVasSQLBuf.WriteString("(")
 		for key, value := range columns {
-			if needResolveVindexType && strings.EqualFold(value.String(), tb.ColumnVindexes[0].Columns[0].String()) {
-				vindexIdx = key
-				for _, field := range fields {
-					if strings.EqualFold(field.Name, value.String()) {
-						vindexFiledType = field.Type
-						break
-					}
+			for _, field := range fields {
+				if strings.EqualFold(field.Name, value.String()) {
+					specificFields = append(specificFields, field)
 				}
 			}
 			insertVasSQLBuf.WriteString(value.String())
@@ -243,39 +234,45 @@ func (l *LoadDataInfo) MakeInsert(rows [][]string, tb *vindexes.Table, fields []
 			}
 		}
 		insertVasSQLBuf.WriteString(") ")
+	} else {
+		specificFields = fields
+		columnsSize = len(specificFields)
+		for key, e := range specificFields {
+			insertVasSQLBuf.WriteString(e.Name)
+			if key != columnsSize-1 {
+				insertVasSQLBuf.WriteString(",")
+			}
+		}
+		insertVasSQLBuf.WriteString(") ")
 	}
-	insertVasSQLBuf.WriteString(" values ")
-	for k, record := range rows {
+	insertVasSQLBuf.WriteString("values")
+	for r, record := range rows {
 		insertVasSQLBuf.WriteString("(")
-		for j := 0; j < columnsSize; j++ {
 
+		for k, specificField := range specificFields {
 			var column string
-			if j >= len(record) {
+			if k >= len(record) {
 				column = ""
 			} else {
-				column = record[j]
+				column = record[k]
 			}
 
-			// Distinguish the type of split field
-			if needResolveVindexType && j == vindexIdx && isNumericType(vindexFiledType) {
-				insertVasSQLBuf.WriteString(" ")
-			} else {
+			// Distinguish the type of  field. number or char.
+			// if number eg:insert values(100);
+			// if string eg:insert values('100')
+			if !isNumericType(specificField.Type) {
 				insertVasSQLBuf.WriteString("'")
 			}
 			insertVasSQLBuf.WriteString(column)
-
-			if needResolveVindexType && j == vindexIdx && isNumericType(vindexFiledType) {
-				insertVasSQLBuf.WriteString(" ")
-			} else {
+			if !isNumericType(specificField.Type) {
 				insertVasSQLBuf.WriteString("'")
 			}
-
-			if j != columnsSize-1 {
+			if k != columnsSize-1 {
 				insertVasSQLBuf.WriteString(",")
 			}
 		}
 
-		if k == len(rows)-1 {
+		if r == len(rows)-1 {
 			insertVasSQLBuf.WriteString(")")
 		} else {
 			insertVasSQLBuf.WriteString("),")
@@ -347,18 +344,17 @@ func (l *LoadDataInfo) InsertData(prevData, curData []byte, rows *[][]string, tb
 			if inserts, err := l.MakeInsert(*rows, tb, fields); err != nil {
 				return nil, false, err
 			} else {
-				*rows = make([][]string, 0,*loadMaxRowsInBatch)
+				*rows = make([][]string, 0, *loadMaxRowsInBatch)
 				if err := callback(inserts); err != nil {
 					return nil, false, err
 				}
-				break
 			}
 		}
 	}
 	return curData, reachLimit, nil
 }
 
-func (l *LoadDataInfo) insertDataWithBatch(prevData, curData []byte,  rows *[][]string, tb *vindexes.Table, fields []*querypb.Field, callback InsertFunc) ([]byte, error) {
+func (l *LoadDataInfo) insertDataWithBatch(prevData, curData []byte, rows *[][]string, tb *vindexes.Table, fields []*querypb.Field, callback InsertFunc) ([]byte, error) {
 	var err error
 	var reachLimit bool
 	for {
@@ -374,7 +370,6 @@ func (l *LoadDataInfo) insertDataWithBatch(prevData, curData []byte,  rows *[][]
 	}
 	return prevData, nil
 }
-
 
 func escapeCols(strs [][]byte) []string {
 	ret := make([]string, len(strs))

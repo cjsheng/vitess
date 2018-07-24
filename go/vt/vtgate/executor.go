@@ -47,13 +47,12 @@ import (
 	"vitess.io/vitess/go/vt/vtgate/vindexes"
 	"vitess.io/vitess/go/vt/vtgate/vschemaacl"
 
+	"vitess.io/vitess/go/mysql"
 	querypb "vitess.io/vitess/go/vt/proto/query"
 	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 	vschemapb "vitess.io/vitess/go/vt/proto/vschema"
 	vtgatepb "vitess.io/vitess/go/vt/proto/vtgate"
 	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
-	"vitess.io/vitess/go/mysql"
-	"io"
 )
 
 var (
@@ -233,12 +232,10 @@ func (e *Executor) execute(ctx context.Context, safeSession *SafeSession, sql st
 		// The control flow is such that autocommitable can only be turned on
 		// at the beginning, but never after.
 		safeSession.SetAutocommitable(mustCommit)
-
-		qr, err :=e.LoadDataStart(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
+		qr, err := e.LoadDataStart(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
 		if err != nil {
 			return nil, err
 		}
-
 		if mustCommit {
 			commitStart := time.Now()
 			if err = e.txConn.Commit(ctx, safeSession); err != nil {
@@ -345,7 +342,6 @@ func (e *Executor) handleExec(ctx context.Context, safeSession *SafeSession, sql
 	}
 
 	plan.AddStats(1, time.Since(logStats.StartTime), uint64(logStats.ShardQueries), logStats.RowsAffected, errCount)
-
 	return qr, err
 }
 
@@ -1406,15 +1402,18 @@ func buildVarCharRow(values ...string) []sqltypes.Value {
 	return row
 }
 
-func (e *Executor) LoadDataStart(ctx context.Context, safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable, destKeyspace string, destTabletType topodatapb.TabletType, dest key.Destination, logStats *LogStats )(*sqltypes.Result, error) {
+//LoadDataStart  "load data" is divided into three phases:
+// 1. Parse and verify the syntax.
+// 2. Send a file  request to the client with file path.
+// 3. Parse the  file stream to bath insert statement and send to tablet
+func (e *Executor) LoadDataStart(ctx context.Context, safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable, destKeyspace string, destTabletType topodatapb.TabletType, dest key.Destination, logStats *LogStats) (*sqltypes.Result, error) {
 
 	c := ctx.Value("conn").(*mysql.Conn)
 	loadData := NewLoadData()
 	stmt, err := sqlparser.Parse(sql)
 	if err != nil {
-		return nil,mysql.NewSQLErrorFromError(err)
+		return nil, mysql.NewSQLErrorFromError(err)
 	}
-
 
 	loadStmt, ok := stmt.(*sqlparser.LoadDataStmt)
 	if !ok {
@@ -1425,10 +1424,19 @@ func (e *Executor) LoadDataStart(ctx context.Context, safeSession *SafeSession, 
 	kspName := c.SchemaName
 	tb, err := e.vschema.FindTable(kspName, tbName)
 	if tb == nil {
-		return nil, fmt.Errorf("table %s not found", tbName)
+		return nil, fmt.Errorf("table %s not found %v", tbName, err)
 	}
+
+	if len(loadStmt.LinesInfo.Terminated) == 0 {
+		return nil, errors.New("Load Data: don't support load data terminated is nil")
+	}
+
+	if loadStmt.Path == "" {
+		return nil, errors.New("Load Data: infile path is empty.")
+	}
+
 	if loadStmt.IsLocal {
-		// send request of file to client
+		// Send  the request of file stream to client
 		if err := c.WriteRequestFilePacket([]byte(loadStmt.Path)); err != nil {
 			return nil, err
 		}
@@ -1436,86 +1444,89 @@ func (e *Executor) LoadDataStart(ctx context.Context, safeSession *SafeSession, 
 		return nil, fmt.Errorf(" Load data statement only support local ")
 	}
 
-	if err != nil {
-		return nil, err
-	}
-	res, err := e.LoadDataInfileDataStream(loadData /*data,*/, ctx,tb,safeSession,sql,bindVars,destKeyspace,destTabletType,dest,logStats)
+	res, err := e.LoadDataInfileDataStream(loadData, ctx, tb, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
 	if err != nil {
 		log.Errorf("Error writing query error to client, err:%v", err)
+
+		// If the data on the connection cannot be read, then the error message cannot be returned to the mysql client.
+		// In fact, mysql does not return  error to the client  when executing "load data" ;mysql could ignores it
+		// as much as possible.
 		for {
+			//If set LoadDataDone=true, the connection data  has been read done.
 			if c.LoadDataDone {
-				break
+				return nil, err
 			}
-			if p, err := c.ReadPacket(); len(p) == 0 || err != nil {
-				break
+			if p, _ := c.ReadPacket(); len(p) == 0 {
+				return nil, err
 			}
 		}
-		return nil, err
 	}
 	return res, nil
 
 }
 
-
-
-func (e *Executor) LoadDataInfileDataStream( ld *LoadData, ctx context.Context, tb *vindexes.Table,safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable, destKeyspace string, destTabletType topodatapb.TabletType, dest key.Destination, logStats *LogStats) (*sqltypes.Result, error) {
+// LoadDataInfileDataStream parse the file stream to bath insert statement and send to tablet
+// note:
+func (e *Executor) LoadDataInfileDataStream(ld *LoadData, ctx context.Context, tb *vindexes.Table, safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable, destKeyspace string, destTabletType topodatapb.TabletType, dest key.Destination, logStats *LogStats) (*sqltypes.Result, error) {
 	c := ctx.Value("conn").(*mysql.Conn)
 	loadRes := &sqltypes.Result{}
 	var prevData, curData []byte
 	var result *sqltypes.Result
 	var fields []*querypb.Field
 	var err error
-	var shouldBreak bool
-	var rows = make([][]string, 0,*loadMaxRowsInBatch)
+	var stopReadFromConn bool
+	var rows = make([][]string, 0, *loadMaxRowsInBatch)
+
+	//Get all the fields of the table
+	re, err := e.GetFields(ctx, safeSession, fmt.Sprintf("SELECT * FROM %s", tb.Name.String()), bindVars, destKeyspace, destTabletType, logStats)
+	if err != nil {
+		return nil, err
+	}
+	fields = re.Fields
 	for {
 		curData, err = c.ReadPacket()
 		if err != nil {
-			c.LoadDataDone = true
-			if err == io.EOF {
-				log.Error(err)
-				c.LoadDataDone = true
-				break
-			}
+			return nil, err
 		}
 
 		if len(curData) == 0 {
-			shouldBreak = true
+			stopReadFromConn = true
 			if len(prevData) == 0 {
 				c.LoadDataDone = true
 				break
 			}
 		}
-		re,err:=e.GetFields(ctx,safeSession,fmt.Sprintf("SELECT * FROM %s", tb.Name.String()),bindVars,destKeyspace,destTabletType,logStats)
-		if err!=nil{
-			return nil,err
-		}
-		fields=re.Fields
-		if prevData,err = ld.LoadDataInfo.insertDataWithBatch(prevData, curData,  &rows, tb, fields, func(insert string) error {
-			// load data retry ExecuteMerge
-			if insert == "" {
+
+		prevData, err = ld.LoadDataInfo.insertDataWithBatch(prevData, curData, &rows, tb, fields, func(inserts string) error {
+			if inserts == "" {
 				return nil
 			}
-			result, err = e.LoadDataRetry(ctx,result,safeSession,insert,bindVars,destKeyspace,destTabletType,dest,logStats)
+
+			// inserts contains up to 200 records,and retry "loadMaxRetryTimes" times
+			result, err = e.LoadDataRetry(ctx, result, safeSession, inserts, bindVars, destKeyspace, destTabletType, dest, logStats)
 			if err != nil {
 				return err
 			}
+
 			loadRes.InsertID = result.InsertID
 			loadRes.RowsAffected += result.RowsAffected
 			loadRes.Fields = result.Fields
 			return nil
-		}); err != nil {
+		})
+		if err != nil {
 			return nil, err
 		}
-		if shouldBreak {
-			c.LoadDataDone = true
+		if stopReadFromConn {
 			break
 		}
 	}
+	// The program come here to indicate that the conn must have been read done(c.LoadDataDone=true).
 	if len(rows) > 0 {
+		c.LoadDataDone = true
 		if inserts, err := ld.LoadDataInfo.MakeInsert(rows, tb, fields); err != nil {
 			return nil, err
 		} else {
-			result, err =e.LoadDataRetry(ctx,result,safeSession,inserts,bindVars,destKeyspace,destTabletType,dest,logStats)
+			result, err = e.LoadDataRetry(ctx, result, safeSession, inserts, bindVars, destKeyspace, destTabletType, dest, logStats)
 			if err != nil {
 				return nil, err
 			}
@@ -1527,46 +1538,44 @@ func (e *Executor) LoadDataInfileDataStream( ld *LoadData, ctx context.Context, 
 	return loadRes, nil
 }
 
-// LoadDataRetry Try again twice when an error occurs
+// LoadDataRetry try again twice when an error occurs
 func (e *Executor) LoadDataRetry(ctx context.Context, result *sqltypes.Result, safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable, destKeyspace string, destTabletType topodatapb.TabletType, dest key.Destination, logStats *LogStats) (*sqltypes.Result, error) {
 	var execErr error
-	lmrt:=*loadMaxRetryTimes
-	for i := 1; i <= lmrt; i++ {
+	fmt.Println(sql)
+	for i := 1; i <= *loadMaxRetryTimes; i++ {
 		result, execErr = e.handleExec(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
-
 		if execErr != nil {
-			return nil,mysql.NewSQLErrorFromError(execErr)
+			if ec := vterrors.Code(execErr); ec == vtrpcpb.Code_RESOURCE_EXHAUSTED ||
+				ec == vtrpcpb.Code_ABORTED {
+				return nil, mysql.NewSQLErrorFromError(execErr)
+			}
 		} else {
 			break
 		}
 	}
+	if execErr != nil {
+		return nil, mysql.NewSQLErrorFromError(execErr)
+	}
 	return result, nil
 }
 
-
 // GetFields returns the information of fields for prepared statements.
-func (e *Executor) GetFields(ctx context.Context,safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable,
-	destKeyspace string, destTabletType topodatapb.TabletType,  logStats *LogStats) (*sqltypes.Result, error) {
+func (e *Executor) GetFields(ctx context.Context, safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable,
+	destKeyspace string, destTabletType topodatapb.TabletType, logStats *LogStats) (*sqltypes.Result, error) {
 	if bindVars == nil {
 		bindVars = make(map[string]*querypb.BindVariable)
 	}
-
-	// V3 mode.
-	query, comments := sqlparser.SplitMarginComments(sql)
-	vcursor := newVCursorImpl(ctx, safeSession, destKeyspace, destTabletType, comments, e, logStats)
+	vcursor := newVCursorImpl(ctx, safeSession, destKeyspace, destTabletType, sqlparser.MarginComments{}, e, logStats)
 	plan, err := e.getPlan(
 		vcursor,
-		query,
-		comments,
+		sql,
+		sqlparser.MarginComments{},
 		bindVars,
 		skipQueryPlanCache(safeSession),
 		logStats,
 	)
-	if err!=nil{
-		return nil,err
+	if err != nil {
+		return nil, err
 	}
-	if strings.HasPrefix(strings.ToLower(sql), "select ") {
-		return	 plan.Instructions.GetFields(vcursor,bindVars)
-	}
-	return &sqltypes.Result{}, nil
+	return plan.Instructions.GetFields(vcursor, bindVars)
 }

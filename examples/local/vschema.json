@@ -6,10 +6,18 @@
     }
   },
   "tables": {
-    "messages": {
+    "message": {
       "column_vindexes": [
         {
-          "column": "page",
+          "column": "user_id",
+          "name": "hash"
+        }
+      ]
+    },
+    "BITTESTTABLE": {
+      "column_vindexes": [
+        {
+          "column": "db_field",
           "name": "hash"
         }
       ]
